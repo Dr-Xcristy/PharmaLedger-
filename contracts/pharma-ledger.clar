@@ -10,7 +10,7 @@
 ;; - A secure custody transfer mechanism for each batch.
 ;; - Publicly verifiable history for every batch.
 ;;
-;; Version: 1.0.0
+;; Version: 1.0.1
 ;; Author: [Your Name]
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -29,6 +29,7 @@
 (define-constant ERR-INVALID-CUSTODIAN u107)
 (define-constant ERR-ALREADY-REGISTERED u108)
 (define-constant ERR-EMPTY-METADATA u109)
+(define-constant ERR-CUSTODY-HISTORY-FULL u110)
 
 ;;;;;;;;;;;;;;;;;;;;;;;
 ;; Data Structures ;;
@@ -75,18 +76,17 @@
 ;; Value: A list of principals who have held the batch
 (define-map batch-custody-history uint (list 200 principal))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Administrative Functions  ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; @desc Adds a new trusted manufacturer to the system.
 ;; @param new-manufacturer: The principal of the manufacturer to add.
-;; @returns (response bool bool)
+;; @returns (response bool uint)
 (define-public (add-manufacturer (new-manufacturer principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT-ADMIN) (err ERR-UNAUTHORIZED))
-    (asserts! (not (is-some (map-get? manufacturers new-manufacturer))) (err ERR-ALREADY-REGISTERED))
+    (asserts! (is-none (map-get? manufacturers new-manufacturer)) (err ERR-ALREADY-REGISTERED))
     (map-set manufacturers new-manufacturer true)
     (ok true)
   )
@@ -94,16 +94,15 @@
 
 ;; @desc Adds a new trusted distributor to the system.
 ;; @param new-distributor: The principal of the distributor to add.
-;; @returns (response bool bool)
+;; @returns (response bool uint)
 (define-public (add-distributor (new-distributor principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT-ADMIN) (err ERR-UNAUTHORIZED))
-    (asserts! (not (is-some (map-get? distributors new-distributor))) (err ERR-ALREADY-REGISTERED))
+    (asserts! (is-none (map-get? distributors new-distributor)) (err ERR-ALREADY-REGISTERED))
     (map-set distributors new-distributor true)
     (ok true)
   )
 )
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Core Logic - Manufacturers ;;
@@ -116,7 +115,6 @@
 (define-public (register-drug-type (name (buff 32)) (formula (buff 64)))
   (begin
     (asserts! (is-some (map-get? manufacturers tx-sender)) (err ERR-MANUFACTURER-NOT-FOUND))
-
     (let ((drug-id (+ u1 (var-get last-drug-id))))
       (map-set drug-types drug-id
         {
@@ -146,7 +144,6 @@
       )
       ;; Ensure the caller is the original manufacturer of this drug type
       (asserts! (is-eq tx-sender (get manufacturer drug-info)) (err ERR-UNAUTHORIZED))
-
       (let ((batch-id (+ u1 (var-get last-batch-id))))
         ;; Create the batch record
         (map-set drug-batches batch-id
@@ -160,7 +157,6 @@
         )
         ;; Initialize the custody history with the manufacturer
         (map-set batch-custody-history batch-id (list tx-sender))
-
         (var-set last-batch-id batch-id)
         (print { action: "create-drug-batch", batch-id: batch-id, drug-id: drug-id })
         (ok batch-id)
@@ -169,7 +165,6 @@
   )
 )
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Core Logic - Custody     ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -177,12 +172,11 @@
 ;; @desc Transfers ownership of a drug batch to a new custodian (e.g., a distributor).
 ;; @param batch-id: The ID of the batch to transfer.
 ;; @param new-custodian: The principal of the new owner.
-;; @returns (response bool bool)
+;; @returns (response bool uint)
 (define-public (transfer-batch-custody (batch-id uint) (new-custodian principal))
   (begin
     ;; Ensure the new custodian is a registered manufacturer or distributor
     (asserts! (or (is-some (map-get? manufacturers new-custodian)) (is-some (map-get? distributors new-custodian))) (err ERR-INVALID-CUSTODIAN))
-
     (let
       (
         (batch-record (unwrap! (map-get? drug-batches batch-id) (err ERR-BATCH-NOT-FOUND)))
@@ -191,19 +185,17 @@
       )
       ;; Ensure the caller is the current owner of the batch
       (asserts! (is-eq tx-sender current-owner) (err ERR-NOT-BATCH-OWNER))
-
+      ;; Check if we can add another entry to the custody history
+      (asserts! (< (len custody-history) u200) (err ERR-CUSTODY-HISTORY-FULL))
       ;; Update the batch owner
       (map-set drug-batches batch-id (merge batch-record { current-owner: new-custodian }))
-
       ;; Append the new owner to the custody history
-      (map-set batch-custody-history batch-id (append custody-history new-custodian))
-
+      (map-set batch-custody-history batch-id (unwrap! (as-max-len? (append custody-history new-custodian) u200) (err ERR-CUSTODY-HISTORY-FULL)))
       (print { action: "transfer-custody", batch-id: batch-id, from: tx-sender, to: new-custodian })
       (ok true)
     )
   )
 )
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Read-Only Functions ;;
@@ -211,47 +203,47 @@
 
 ;; @desc Gets the details of a specific drug type.
 ;; @param drug-id: The ID of the drug type.
-;; @returns (response (optional { name: (buff 32), ... }) (optional { name: (buff 32), ... }))
+;; @returns (optional { name: (buff 32), formula: (buff 64), manufacturer: principal })
 (define-read-only (get-drug-type-info (drug-id uint))
   (map-get? drug-types drug-id)
 )
 
 ;; @desc Gets the details of a specific drug batch.
 ;; @param batch-id: The ID of the batch.
-;; @returns (response (optional { drug-id: uint, ... }) (optional { drug-id: uint, ... }))
+;; @returns (optional { drug-id: uint, mfg-date: uint, exp-date: uint, current-owner: principal, metadata-uri: (string-ascii 256) })
 (define-read-only (get-batch-info (batch-id uint))
   (map-get? drug-batches batch-id)
 )
 
 ;; @desc Gets the complete custody history of a specific drug batch.
 ;; @param batch-id: The ID of the batch.
-;; @returns (response (optional (list 200 principal)) (optional (list 200 principal)))
+;; @returns (optional (list 200 principal))
 (define-read-only (get-batch-custody-history (batch-id uint))
   (map-get? batch-custody-history batch-id)
 )
 
 ;; @desc Checks if a principal is a registered manufacturer.
 ;; @param who: The principal to check.
-;; @returns (response bool bool)
+;; @returns bool
 (define-read-only (is-manufacturer (who principal))
   (is-some (map-get? manufacturers who))
 )
 
 ;; @desc Checks if a principal is a registered distributor.
 ;; @param who: The principal to check.
-;; @returns (response bool bool)
+;; @returns bool
 (define-read-only (is-distributor (who principal))
   (is-some (map-get? distributors who))
 )
 
 ;; @desc Gets the total number of drug types registered.
-;; @returns (response uint uint)
+;; @returns uint
 (define-read-only (get-total-drug-types)
-  (ok (var-get last-drug-id))
+  (var-get last-drug-id)
 )
 
 ;; @desc Gets the total number of batches created.
-;; @returns (response uint uint)
+;; @returns uint
 (define-read-only (get-total-batches)
-  (ok (var-get last-batch-id))
+  (var-get last-batch-id)
 )
