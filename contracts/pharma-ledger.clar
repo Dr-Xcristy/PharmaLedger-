@@ -30,6 +30,10 @@
 (define-constant ERR-ALREADY-REGISTERED u108)
 (define-constant ERR-EMPTY-METADATA u109)
 (define-constant ERR-CUSTODY-HISTORY-FULL u110)
+(define-constant ERR-INVALID-NAME u111)
+(define-constant ERR-INVALID-FORMULA u112)
+(define-constant ERR-INVALID-DATE u113)
+(define-constant ERR-INVALID-METADATA-URI u114)
 
 ;;;;;;;;;;;;;;;;;;;;;;;
 ;; Data Structures ;;
@@ -76,6 +80,39 @@
 ;; Value: A list of principals who have held the batch
 (define-map batch-custody-history uint (list 200 principal))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Helper Functions    ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; @desc Validates that a drug name is not empty
+;; @param name: The drug name to validate
+;; @returns bool
+(define-private (is-valid-name (name (buff 32)))
+  (> (len name) u0)
+)
+
+;; @desc Validates that a formula is not empty
+;; @param formula: The formula to validate
+;; @returns bool
+(define-private (is-valid-formula (formula (buff 64)))
+  (> (len formula) u0)
+)
+
+;; @desc Validates that expiration date is after manufacturing date
+;; @param mfg-date: Manufacturing date
+;; @param exp-date: Expiration date
+;; @returns bool
+(define-private (is-valid-date-range (mfg-date uint) (exp-date uint))
+  (> exp-date mfg-date)
+)
+
+;; @desc Validates that metadata URI is not empty
+;; @param metadata-uri: The metadata URI to validate
+;; @returns bool
+(define-private (is-valid-metadata-uri (metadata-uri (string-ascii 256)))
+  (> (len metadata-uri) u0)
+)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Administrative Functions  ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -115,6 +152,10 @@
 (define-public (register-drug-type (name (buff 32)) (formula (buff 64)))
   (begin
     (asserts! (is-some (map-get? manufacturers tx-sender)) (err ERR-MANUFACTURER-NOT-FOUND))
+    ;; Validate input parameters
+    (asserts! (is-valid-name name) (err ERR-INVALID-NAME))
+    (asserts! (is-valid-formula formula) (err ERR-INVALID-FORMULA))
+
     (let ((drug-id (+ u1 (var-get last-drug-id))))
       (map-set drug-types drug-id
         {
@@ -138,6 +179,10 @@
 ;; @returns (response uint uint) - The new batch-id.
 (define-public (create-drug-batch (drug-id uint) (mfg-date uint) (exp-date uint) (metadata-uri (string-ascii 256)))
   (begin
+    ;; Validate input parameters
+    (asserts! (is-valid-date-range mfg-date exp-date) (err ERR-INVALID-DATE))
+    (asserts! (is-valid-metadata-uri metadata-uri) (err ERR-INVALID-METADATA-URI))
+
     (let
       (
         (drug-info (unwrap! (map-get? drug-types drug-id) (err ERR-DRUG-TYPE-NOT-FOUND)))
